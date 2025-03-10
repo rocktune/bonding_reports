@@ -1,5 +1,3 @@
-
-
 import io
 import re
 import os
@@ -10,7 +8,17 @@ from PIL import Image
 import pytesseract
 import config
 from PyQt5.QtWidgets import QDialog, QMessageBox
+from PyQt5.QtCore import QByteArray
 from pdf2image import convert_from_path
+
+# Sprawdzenie, czy PaddleOCR jest dostępny
+PADDLE_AVAILABLE = False
+try:
+    from paddleocr import PaddleOCR
+    PADDLE_AVAILABLE = True
+    print("PaddleOCR został pomyślnie zaimportowany i jest dostępny.")
+except ImportError:
+    print("PaddleOCR nie jest dostępny. Używany będzie Tesseract OCR.")
 
 
 class PDFProcessor:
@@ -20,6 +28,22 @@ class PDFProcessor:
         
         # Konfiguracja ścieżki do Tesseract OCR
         pytesseract.pytesseract.tesseract_cmd = config.TESSERACT_PATH
+        
+        # Inicjalizacja PaddleOCR, tylko jeśli jest dostępny
+        self.paddle_ocr = None
+        if PADDLE_AVAILABLE:
+            try:
+                self.paddle_ocr = PaddleOCR(
+                    use_angle_cls=True,  # Automatyczna korekcja orientacji
+                    lang='en',           # Model dla języka angielskiego (najlepszy dla cyfr)
+                    rec_algorithm='SVTR_LCNet',  # Algorytm rozpoznawania (dobry dla pisma odręcznego)
+                    use_gpu=False,       # Zmień na True, jeśli masz GPU
+                    show_log=False       # Wyłączenie logowania
+                )
+                print("PaddleOCR został zainicjalizowany pomyślnie.")
+            except Exception as e:
+                print(f"Błąd podczas inicjalizacji PaddleOCR: {e}")
+                print("Będzie używany Tesseract OCR.")
         
         # Tworzymy katalog na obrazy diagnostyczne, jeśli nie istnieje
         self.debug_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "debug_images")
@@ -55,7 +79,6 @@ class PDFProcessor:
     def preprocess_image_for_handwriting(self, image, roi_name="unknown"):
         """Zaawansowane przetwarzanie obrazu dla lepszego rozpoznawania pisma odręcznego."""
         try:
-            # Poprzednia implementacja pozostaje bez zmian
             # Zapisanie oryginalnego obrazu ROI do debugowania
             debug_path = os.path.join(self.debug_dir, f"roi_{roi_name}_original.png")
             image.save(debug_path)
@@ -73,38 +96,60 @@ class PDFProcessor:
             # Zapisanie obrazu w skali szarości do debugowania
             cv2.imwrite(os.path.join(self.debug_dir, f"roi_{roi_name}_gray.png"), gray)
             
-            # Eksperymentujemy z różnymi metodami przetwarzania obrazu
-            
-            # 1. Metoda: Binaryzacja adaptacyjna
-            binary = cv2.adaptiveThreshold(
-                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
-            )
-            cv2.imwrite(os.path.join(self.debug_dir, f"roi_{roi_name}_binary_adaptive.png"), binary)
-            
-            # 2. Metoda: Prosta binaryzacja z progiem Otsu
-            _, binary_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
-            cv2.imwrite(os.path.join(self.debug_dir, f"roi_{roi_name}_binary_otsu.png"), binary_otsu)
-            
-            # 3. Metoda: Zastosowanie filtru rozmycia, a następnie binaryzacja
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            _, binary_blur = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
-            cv2.imwrite(os.path.join(self.debug_dir, f"roi_{roi_name}_binary_blur.png"), binary_blur)
-            
-            # Wybór metody binaryzacji (możemy przełączać między metodami)
-            # binary = binary_adaptive
-            binary = binary_otsu
-            
-            # Usuwanie szumu
-            kernel = np.ones((1, 1), np.uint8)
-            opening = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-            cv2.imwrite(os.path.join(self.debug_dir, f"roi_{roi_name}_opening.png"), opening)
-            
-            # Dylatacja tekstu (pogrubienie) - pomaga połączyć przerwane linie w piśmie odręcznym
-            dilated = cv2.dilate(opening, np.ones((2, 2), np.uint8), iterations=1)
-            cv2.imwrite(os.path.join(self.debug_dir, f"roi_{roi_name}_dilated.png"), dilated)
-            
-            # Konwersja z powrotem do PIL Image
-            processed_image = Image.fromarray(dilated)
+            # Przetwarzanie dla PaddleOCR
+            if PADDLE_AVAILABLE and self.paddle_ocr:
+                # Wyrównanie histogramu dla zwiększenia kontrastu
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                enhanced = clahe.apply(gray)
+                cv2.imwrite(os.path.join(self.debug_dir, f"roi_{roi_name}_enhanced.png"), enhanced)
+                
+                # Usunięcie szumu
+                denoised = cv2.fastNlMeansDenoising(enhanced, None, 10, 7, 21)
+                cv2.imwrite(os.path.join(self.debug_dir, f"roi_{roi_name}_denoised.png"), denoised)
+                
+                # Wzmocnienie krawędzi
+                kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+                sharpened = cv2.filter2D(denoised, -1, kernel)
+                cv2.imwrite(os.path.join(self.debug_dir, f"roi_{roi_name}_sharpened.png"), sharpened)
+                
+                # Powiększenie obrazu (może poprawić rozpoznawanie)
+                height, width = sharpened.shape
+                scaled = cv2.resize(sharpened, (width*2, height*2), interpolation=cv2.INTER_CUBIC)
+                cv2.imwrite(os.path.join(self.debug_dir, f"roi_{roi_name}_scaled.png"), scaled)
+                
+                # Konwersja z powrotem do PIL Image
+                processed_image = Image.fromarray(scaled)
+            else:
+                # Przetwarzanie dla Tesseract (istniejący kod)
+                # 1. Metoda: Binaryzacja adaptacyjna
+                binary = cv2.adaptiveThreshold(
+                    gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
+                )
+                cv2.imwrite(os.path.join(self.debug_dir, f"roi_{roi_name}_binary_adaptive.png"), binary)
+                
+                # 2. Metoda: Prosta binaryzacja z progiem Otsu
+                _, binary_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
+                cv2.imwrite(os.path.join(self.debug_dir, f"roi_{roi_name}_binary_otsu.png"), binary_otsu)
+                
+                # 3. Metoda: Zastosowanie filtru rozmycia, a następnie binaryzacja
+                blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+                _, binary_blur = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV+cv2.THRESH_OTSU)
+                cv2.imwrite(os.path.join(self.debug_dir, f"roi_{roi_name}_binary_blur.png"), binary_blur)
+                
+                # Wybór metody binaryzacji
+                binary = binary_otsu
+                
+                # Usuwanie szumu
+                kernel = np.ones((1, 1), np.uint8)
+                opening = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+                cv2.imwrite(os.path.join(self.debug_dir, f"roi_{roi_name}_opening.png"), opening)
+                
+                # Dylatacja tekstu (pogrubienie)
+                dilated = cv2.dilate(opening, np.ones((2, 2), np.uint8), iterations=1)
+                cv2.imwrite(os.path.join(self.debug_dir, f"roi_{roi_name}_dilated.png"), dilated)
+                
+                # Konwersja z powrotem do PIL Image
+                processed_image = Image.fromarray(dilated)
             
             # Zapisanie końcowego przetworzonego obrazu
             debug_path = os.path.join(self.debug_dir, f"roi_{roi_name}_processed.png")
@@ -118,8 +163,64 @@ class PDFProcessor:
             traceback.print_exc()
             return image  # Zwróć oryginalny obraz w przypadku błędu
     
-    def extract_text_from_roi(self, image, roi_data, roi_name="unknown"):
-        """Ekstrakcja tekstu z określonego obszaru zainteresowania (ROI)."""
+    def extract_text_from_roi_with_paddle(self, image, roi_data, roi_name="unknown"):
+        """Ekstrakcja tekstu z określonego obszaru przy użyciu PaddleOCR."""
+        if not roi_data:
+            print(f"Brak danych ROI dla {roi_name}")
+            return ""
+        
+        try:
+            # Parsowanie danych ROI
+            roi = [int(val) for val in roi_data.split(',')]
+            if len(roi) != 4:
+                print(f"Nieprawidłowe dane ROI dla {roi_name}: {roi_data}")
+                return ""
+            
+            print(f"Wycinanie ROI {roi_name} z koordynatami: {roi}")
+            
+            # Wycięcie obszaru zainteresowania
+            roi_image = image.crop((roi[0], roi[1], roi[2], roi[3]))
+            
+            # Przetworzenie obrazu dla lepszego OCR
+            roi_image = self.preprocess_image_for_handwriting(roi_image, roi_name)
+            
+            # Zapisanie przetworzonego obrazu do numpy array dla PaddleOCR
+            np_image = np.array(roi_image)
+            
+            # Uruchomienie PaddleOCR
+            results = self.paddle_ocr.ocr(np_image, cls=True)
+            
+            # Wyciągnięcie tekstu z wyników
+            extracted_text = ""
+            
+            if results and isinstance(results[0], list):
+                # Pętla przez wszystkie znalezione teksty
+                for line in results[0]:
+                    if isinstance(line, list) and len(line) >= 2:
+                        text, confidence = line[1]
+                        print(f"PaddleOCR {roi_name}: '{text}' (pewność: {confidence:.2f})")
+                        
+                        # Dla numerów, zostawiamy tylko cyfry i znaki specjalne
+                        if roi_name == "numer_zlecenia":
+                            text = re.sub(r'[^0-9\-]', '', text)
+                        elif roi_name == "numer_operatora":
+                            text = re.sub(r'[^0-9]', '', text)
+                        
+                        # Dodanie do wyniku tylko jeśli pewność jest wystarczająca
+                        if confidence > 0.5:  # Próg pewności 50%
+                            extracted_text += text
+            
+            print(f"Finalny tekst dla {roi_name}: '{extracted_text}'")
+            return extracted_text
+            
+        except Exception as e:
+            print(f"Błąd podczas ekstrakcji tekstu z ROI {roi_name} za pomocą PaddleOCR: {e}")
+            import traceback
+            traceback.print_exc()
+            return ""
+    
+    def extract_text_from_roi_with_tesseract(self, image, roi_data, roi_name="unknown"):
+        """Ekstrakcja tekstu z określonego obszaru przy użyciu Tesseract OCR."""
         if not roi_data:
             print(f"Brak danych ROI dla {roi_name}")
             return ""
@@ -158,10 +259,20 @@ class PDFProcessor:
             return ""
             
         except Exception as e:
-            print(f"Błąd podczas ekstrakcji tekstu z ROI {roi_name}: {e}")
+            print(f"Błąd podczas ekstrakcji tekstu z ROI {roi_name} za pomocą Tesseract: {e}")
             import traceback
             traceback.print_exc()
             return ""
+    
+    def extract_text_from_roi(self, image, roi_data, roi_name="unknown"):
+        """Ekstrakcja tekstu z określonego obszaru zainteresowania (ROI)."""
+        # Wybór metody OCR w zależności od dostępności PaddleOCR
+        if PADDLE_AVAILABLE and self.paddle_ocr:
+            print(f"Używam PaddleOCR dla {roi_name}")
+            return self.extract_text_from_roi_with_paddle(image, roi_data, roi_name)
+        else:
+            print(f"Używam Tesseract OCR dla {roi_name}")
+            return self.extract_text_from_roi_with_tesseract(image, roi_data, roi_name)
     
     def format_to_pattern(self, digits):
         """Formatowanie ciągu cyfr do wzoru XXX-XXXX-XXXX-XXX."""
@@ -361,4 +472,4 @@ class PDFProcessor:
             return None, None, None
 
 # Dodaj eksport klasy
-__all__ = ['PDFProcessor']# -*- coding: utf-8 -*-
+__all__ = ['PDFProcessor']

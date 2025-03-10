@@ -8,3 +8,5 @@ pdf2image>=1.16.0
 easyocr>=1.7.2
 torch>=1.10.0  # Wymagane przez EasyOCR
 torchvision>=0.11.0  # Wymagane przez EasyOCR
+paddlepaddle>=2.4.2  # Silnik PaddlePaddle
+paddleocr>=2.6.1.3  # PaddleOCR
