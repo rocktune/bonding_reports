@@ -3,254 +3,140 @@
 import io
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
                             QLineEdit, QDialogButtonBox, QMessageBox, QGraphicsView, 
-                            QGraphicsScene, QGraphicsPixmapItem)
-from PyQt5.QtCore import Qt, QRectF, QPointF, QByteArray  # QByteArray przeniesiony do importu z QtCore
-from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QBrush  # usunięty QByteArray z QtGui
+                            QGraphicsScene, QGraphicsPixmapItem, QWidget, 
+                            QFormLayout, QScrollArea)
+from PyQt5.QtCore import Qt, QByteArray
+from PyQt5.QtGui import QPixmap
 
-from controllers.pdf_processor import PDFProcessor
 
-
-class TemplateCreatorDialog(QDialog):
-    """Dialog do tworzenia szablonu rozpoznawania dokumentów."""
-    def __init__(self, pdf_path, db_manager, parent=None):
+class OCRResultDialog(QDialog):
+    def __init__(self, debug_info, pdf_path, parent=None):
         super().__init__(parent)
+        self.debug_info = debug_info
         self.pdf_path = pdf_path
-        self.db_manager = db_manager
-        self.roi = {"numer_zlecenia": None, "numer_operatora": None, "data": None}
-        self.current_roi_type = None
-        self.selection_start = None
-        self.selection_current = None
-        self.image = None
-        self.pixmap_item = None  # Inicjalizacja atrybutu
         
-        self.init_ui()
-        self.load_pdf()
-        
-    def init_ui(self):
-        """Inicjalizacja interfejsu użytkownika."""
-        self.setWindowTitle("Kreator szablonu rozpoznawania")
-        self.setMinimumSize(800, 600)
+        self.setWindowTitle("Import dokumentu")
+        self.setMinimumSize(1000, 700)
         
         layout = QVBoxLayout()
         
-        # Instrukcje
-        instructions = QLabel("Zaznacz prostokątne obszary na dokumencie, które zawierają:")
-        layout.addWidget(instructions)
+        # Lewa strona - podgląd dokumentu
+        preview_layout = QVBoxLayout()
         
-        # Przyciski wyboru ROI
-        roi_buttons_layout = QHBoxLayout()
+        # Podgląd dokumentu z zaznaczonymi obszarami
+        preview_layout.addWidget(QLabel("<b>Dokument z zaznaczonymi obszarami:</b>"))
         
-        self.btn_numer_zlecenia = QPushButton("1. Numer zlecenia")
-        self.btn_numer_zlecenia.clicked.connect(lambda: self.start_roi_selection("numer_zlecenia"))
-        roi_buttons_layout.addWidget(self.btn_numer_zlecenia)
+        self.image_view = QLabel()
+        self.image_view.setAlignment(Qt.AlignCenter)
         
-        self.btn_numer_operatora = QPushButton("2. Numer operatora")
-        self.btn_numer_operatora.clicked.connect(lambda: self.start_roi_selection("numer_operatora"))
-        roi_buttons_layout.addWidget(self.btn_numer_operatora)
+        # Wczytanie obrazu
+        pixmap = QPixmap()
+        pixmap.loadFromData(QByteArray(self.debug_info['image_data']))
         
-        self.btn_data = QPushButton("3. Data")
-        self.btn_data.clicked.connect(lambda: self.start_roi_selection("data"))
-        roi_buttons_layout.addWidget(self.btn_data)
+        # Skalowanie obrazu, jeśli jest zbyt duży
+        max_width = 700
+        if pixmap.width() > max_width:
+            pixmap = pixmap.scaledToWidth(max_width, Qt.SmoothTransformation)
         
-        layout.addLayout(roi_buttons_layout)
+        self.image_view.setPixmap(pixmap)
         
-        # Obszar podglądu dokumentu
-        self.view = QGraphicsView()
-        self.scene = QGraphicsScene()
-        self.view.setScene(self.scene)
-        self.view.setRenderHint(QPainter.Antialiasing)
-        self.view.setRenderHint(QPainter.SmoothPixmapTransform)
-        self.view.setDragMode(QGraphicsView.NoDrag)
+        scroll_area = QScrollArea()
+        scroll_area.setWidget(self.image_view)
+        scroll_area.setWidgetResizable(True)
+        preview_layout.addWidget(scroll_area)
         
-        # Obsługa myszy dla zaznaczania obszaru
-        self.view.mousePressEvent = self.mouse_press_event
-        self.view.mouseMoveEvent = self.mouse_move_event
-        self.view.mouseReleaseEvent = self.mouse_release_event
+        # Formularz edycji danych
+        form_layout = QFormLayout()
         
-        layout.addWidget(self.view)
+        # Pola edycji danych
+        self.numer_zlecenia_edit = QLineEdit()
+        self.numer_zlecenia_edit.setPlaceholderText("Format: XXX-XXXX-XXXX-XXX")
         
-        # Nazwa szablonu
-        name_layout = QHBoxLayout()
-        name_layout.addWidget(QLabel("Nazwa szablonu:"))
-        self.template_name = QLineEdit("Domyślny szablon")
-        name_layout.addWidget(self.template_name)
-        layout.addLayout(name_layout)
+        self.numer_operatora_edit = QLineEdit()
+        self.data_raportu_edit = QLineEdit()
+        self.data_raportu_edit.setPlaceholderText("Format: DD.MM.YYYY")
+        
+        # Ścieżka do pliku PDF
+        self.sciezka_pdf_edit = QLineEdit(self.pdf_path)
+        self.sciezka_pdf_edit.setReadOnly(True)
+        
+        browse_btn = QPushButton("Zmień...")
+        browse_btn.clicked.connect(self.browse_pdf)
+        
+        pdf_layout = QHBoxLayout()
+        pdf_layout.addWidget(self.sciezka_pdf_edit)
+        pdf_layout.addWidget(browse_btn)
+        
+        # Dodanie etykiet opisowych dla rozpoznanych danych
+        form_layout.addRow("Rozpoznany numer zlecenia:", self.create_readonly_field(self.debug_info['numer_zlecenia']))
+        form_layout.addRow("Numer zlecenia:", self.numer_zlecenia_edit)
+        
+        form_layout.addRow("Rozpoznany numer operatora:", self.create_readonly_field(self.debug_info['numer_operatora']))
+        form_layout.addRow("Numer operatora:", self.numer_operatora_edit)
+        
+        form_layout.addRow("Rozpoznana data:", self.create_readonly_field(self.debug_info['data_raportu']))
+        form_layout.addRow("Data raportu:", self.data_raportu_edit)
+        
+        form_layout.addRow("Ścieżka do pliku PDF:", pdf_layout)
+        
+        # Dodanie formularza do głównego układu
+        preview_layout.addLayout(form_layout)
+        
+        # Przycisk kopiowania rozpoznanych danych
+        kopiuj_btn = QPushButton("Kopiuj rozpoznane dane")
+        kopiuj_btn.clicked.connect(self.kopiuj_rozpoznane_dane)
+        preview_layout.addWidget(kopiuj_btn)
+        
+        # Ustawienie układu
+        layout.addLayout(preview_layout)
         
         # Przyciski
-        button_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(self.save_template)
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
         
         self.setLayout(layout)
-    
-    def load_pdf(self):
-        """Wczytanie pierwszej strony PDF jako obrazu."""
-        try:
-            # Konwersja PDF do obrazu
-            pdf_processor = PDFProcessor(self.db_manager)
-            self.image = pdf_processor.pdf_to_pil_image(self.pdf_path)
-            
-            if self.image:
-                # Konwersja obrazu PIL do QPixmap
-                img_buffer = io.BytesIO()
-                self.image.save(img_buffer, format='PNG')
-                img_data = img_buffer.getvalue()
-                pixmap = QPixmap()
-                pixmap.loadFromData(QByteArray(img_data))
-                
-                self.pixmap_item = QGraphicsPixmapItem(pixmap)
-                self.scene.addItem(self.pixmap_item)
-                self.view.fitInView(self.pixmap_item, Qt.KeepAspectRatio)
-                
-                # Dodanie prostokątów dla już zdefiniowanych ROI
-                self.update_roi_rectangles()
-            else:
-                QMessageBox.critical(self, "Błąd", "Nie można wczytać pliku PDF.")
-        except Exception as e:
-            QMessageBox.critical(self, "Błąd", f"Nie można wczytać pliku PDF:\n{str(e)}")
-    
-    def start_roi_selection(self, roi_type):
-        """Rozpoczęcie wyboru obszaru zainteresowania (ROI)."""
-        self.current_roi_type = roi_type
         
-        # Zmiana koloru przycisków
-        self.btn_numer_zlecenia.setStyleSheet("")
-        self.btn_numer_operatora.setStyleSheet("")
-        self.btn_data.setStyleSheet("")
+        # Wypełnienie wartościami, jeśli zostały rozpoznane
+        if self.debug_info['numer_zlecenia'] != "NIEZNANY":
+            self.numer_zlecenia_edit.setText(self.debug_info['numer_zlecenia'])
         
-        if roi_type == "numer_zlecenia":
-            self.btn_numer_zlecenia.setStyleSheet("background-color: #9CF;")
-        elif roi_type == "numer_operatora":
-            self.btn_numer_operatora.setStyleSheet("background-color: #9CF;")
-        elif roi_type == "data":
-            self.btn_data.setStyleSheet("background-color: #9CF;")
+        if self.debug_info['numer_operatora'] != "NIEZNANY":
+            self.numer_operatora_edit.setText(self.debug_info['numer_operatora'])
+        
+        if self.debug_info['data_raportu'] != "NIEZNANA":
+            self.data_raportu_edit.setText(self.debug_info['data_raportu'])
     
-    def mouse_press_event(self, event):
-        """Obsługa zdarzenia naciśnięcia przycisku myszy."""
-        if self.current_roi_type and self.pixmap_item:
-            # Pobierz współrzędne w skali sceny
-            scene_pos = self.view.mapToScene(event.pos())
-            item_pos = self.pixmap_item.mapFromScene(scene_pos)
-            self.selection_start = (item_pos.x(), item_pos.y())
-            self.selection_current = self.selection_start
-            self.update_roi_rectangles()
-        
-        # Przekazanie zdarzenia do oryginalnej metody
-        QGraphicsView.mousePressEvent(self.view, event)
+    def create_readonly_field(self, text):
+        """Tworzenie pola tylko do odczytu z rozpoznaną wartością."""
+        field = QLineEdit(text)
+        field.setReadOnly(True)
+        field.setStyleSheet("background-color: #f0f0f0;")
+        return field
     
-    def mouse_move_event(self, event):
-        """Obsługa zdarzenia ruchu myszy."""
-        if self.selection_start and self.current_roi_type:
-            # Pobierz współrzędne w skali sceny
-            scene_pos = self.view.mapToScene(event.pos())
-            item_pos = self.pixmap_item.mapFromScene(scene_pos)
-            self.selection_current = (item_pos.x(), item_pos.y())
-            self.update_roi_rectangles()
-        
-        # Przekazanie zdarzenia do oryginalnej metody
-        QGraphicsView.mouseMoveEvent(self.view, event)
+    def kopiuj_rozpoznane_dane(self):
+        """Kopiowanie rozpoznanych danych do pól edycji."""
+        self.numer_zlecenia_edit.setText(self.debug_info['numer_zlecenia'])
+        self.numer_operatora_edit.setText(self.debug_info['numer_operatora'])
+        self.data_raportu_edit.setText(self.debug_info['data_raportu'])
     
-    def mouse_release_event(self, event):
-        """Obsługa zdarzenia zwolnienia przycisku myszy."""
-        if self.selection_start and self.selection_current and self.current_roi_type and self.pixmap_item:
-            # Upewnij się, że współrzędne są w granicach obrazu
-            x1 = max(0, min(self.selection_start[0], self.pixmap_item.pixmap().width()))
-            y1 = max(0, min(self.selection_start[1], self.pixmap_item.pixmap().height()))
-            
-            scene_pos = self.view.mapToScene(event.pos())
-            item_pos = self.pixmap_item.mapFromScene(scene_pos)
-            x2 = max(0, min(item_pos.x(), self.pixmap_item.pixmap().width()))
-            y2 = max(0, min(item_pos.y(), self.pixmap_item.pixmap().height()))
-            
-            # Zapewnienie, że x1 < x2 i y1 < y2
-            x1, x2 = min(x1, x2), max(x1, x2)
-            y1, y2 = min(y1, y2), max(y1, y2)
-            
-            # Zapisanie ROI
-            self.roi[self.current_roi_type] = f"{int(x1)},{int(y1)},{int(x2)},{int(y2)}"
-            
-            # Reset zaznaczenia
-            self.selection_start = None
-            self.selection_current = None
-            
-            # Aktualizacja prostokątów
-            self.update_roi_rectangles()
-            
-            # Zmiana koloru przycisku na zielony, oznaczający zakończony wybór
-            if self.current_roi_type == "numer_zlecenia":
-                self.btn_numer_zlecenia.setStyleSheet("background-color: #9F9;")
-            elif self.current_roi_type == "numer_operatora":
-                self.btn_numer_operatora.setStyleSheet("background-color: #9F9;")
-            elif self.current_roi_type == "data":
-                self.btn_data.setStyleSheet("background-color: #9F9;")
-            
-            self.current_roi_type = None
+    def browse_pdf(self):
+        """Wybór nowej ścieżki do pliku PDF."""
+        from PyQt5.QtWidgets import QFileDialog
         
-        # Przekazanie zdarzenia do oryginalnej metody
-        QGraphicsView.mouseReleaseEvent(self.view, event)
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Wybierz plik PDF", "", "Pliki PDF (*.pdf)"
+        )
+        
+        if file_path:
+            self.sciezka_pdf_edit.setText(file_path)
     
-    def update_roi_rectangles(self):
-        """Aktualizacja prostokątów reprezentujących obszary zainteresowania."""
-        # Usunięcie wszystkich prostokątów
-        for item in self.scene.items():
-            if isinstance(item, QGraphicsPixmapItem) and item == self.pixmap_item:
-                continue
-            self.scene.removeItem(item)
-        
-        # Rysowanie prostokątów dla zapisanych ROI
-        colors = {
-            "numer_zlecenia": QColor(0, 0, 255, 100),  # Niebieski
-            "numer_operatora": QColor(0, 255, 0, 100), # Zielony
-            "data": QColor(255, 0, 0, 100)             # Czerwony
+    def get_data(self):
+        """Zwraca wprowadzone dane."""
+        return {
+            'numer_zlecenia': self.numer_zlecenia_edit.text(),
+            'numer_operatora': self.numer_operatora_edit.text(),
+            'data_raportu': self.data_raportu_edit.text(),
+            'sciezka_pdf': self.sciezka_pdf_edit.text()
         }
-        
-        for roi_type, roi_data in self.roi.items():
-            if roi_data:
-                x1, y1, x2, y2 = map(int, roi_data.split(","))
-                self.scene.addRect(QRectF(x1, y1, x2-x1, y2-y1), QPen(colors[roi_type]), QBrush(colors[roi_type]))
-        
-        # Rysowanie aktualnie zaznaczanego obszaru
-        if self.selection_start and self.selection_current and self.current_roi_type:
-            x1, y1 = self.selection_start
-            x2, y2 = self.selection_current
-            x1, x2 = min(x1, x2), max(x1, x2)
-            y1, y2 = min(y1, y2), max(y1, y2)
-            
-            self.scene.addRect(
-                QRectF(x1, y1, x2-x1, y2-y1),
-                QPen(colors[self.current_roi_type]),
-                QBrush(colors[self.current_roi_type])
-            )
-    
-    def resizeEvent(self, event):
-        """Obsługa zdarzenia zmiany rozmiaru okna."""
-        if hasattr(self, 'pixmap_item') and self.pixmap_item:
-            self.view.fitInView(self.pixmap_item, Qt.KeepAspectRatio)
-        super().resizeEvent(event)
-    
-    def save_template(self):
-        """Zapisanie szablonu do bazy danych."""
-        # Sprawdzenie, czy wszystkie ROI zostały zdefiniowane
-        if not any(self.roi.values()):
-            QMessageBox.warning(self, "Niekompletny szablon", 
-                              "Nie zdefiniowano żadnego obszaru.\nPrzynajmniej jeden obszar jest wymagany.")
-            return
-        
-        try:
-            template_name = self.template_name.text()
-            if not template_name:
-                template_name = "Domyślny szablon"
-            
-            self.db_manager.save_template(
-                template_name,
-                self.roi["numer_zlecenia"],
-                self.roi["numer_operatora"],
-                self.roi["data"]
-            )
-            
-            QMessageBox.information(self, "Sukces", "Szablon został pomyślnie zapisany.")
-            self.accept()
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Błąd", f"Nie można zapisać szablonu:\n{str(e)}")

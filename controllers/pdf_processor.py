@@ -1,16 +1,16 @@
-# -*- coding: utf-8 -*-
+
 
 import io
 import re
 import os
 from datetime import datetime
 import numpy as np
-import fitz  # PyMuPDF
 import cv2
 from PIL import Image
 import pytesseract
 import config
-from PyQt5.QtWidgets import QDialog
+from PyQt5.QtWidgets import QDialog, QMessageBox
+from pdf2image import convert_from_path
 
 
 class PDFProcessor:
@@ -27,30 +27,24 @@ class PDFProcessor:
         print(f"Katalog debugowania: {self.debug_dir}")
         
     def pdf_to_pil_image(self, pdf_path):
-        """Konwersja pierwszej strony PDF do obrazu PIL bez użycia popplera."""
+        """Konwersja pierwszej strony PDF do obrazu PIL używając popplera."""
         try:
-            # Otwarcie PDF za pomocą PyMuPDF (fitz)
-            doc = fitz.open(pdf_path)
-            if doc.page_count == 0:
+            # Konwersja PDF do obrazu używając pdf2image (poppler)
+            images = convert_from_path(pdf_path, dpi=300)  # Wysoka rozdzielczość
+            
+            if not images:
                 print("PDF nie zawiera stron")
                 return None
             
             # Pobieranie pierwszej strony
-            page = doc[0]
-            
-            # Renderowanie strony z większą rozdzielczością (zoom 4x)
-            pix = page.get_pixmap(matrix=fitz.Matrix(4, 4))  # Zwiększona rozdzielczość dla lepszego rozpoznawania
-            
-            # Konwersja do obrazu PIL
-            img_data = pix.tobytes("png")
-            pil_img = Image.open(io.BytesIO(img_data))
+            first_page = images[0]
             
             # Zapisanie obrazu do debugowania
             debug_path = os.path.join(self.debug_dir, "original_pdf.png")
-            pil_img.save(debug_path)
+            first_page.save(debug_path)
             print(f"Zapisano oryginalny obraz do: {debug_path}")
             
-            return pil_img
+            return first_page
             
         except Exception as e:
             print(f"Błąd podczas konwersji PDF do obrazu: {e}")
@@ -61,6 +55,7 @@ class PDFProcessor:
     def preprocess_image_for_handwriting(self, image, roi_name="unknown"):
         """Zaawansowane przetwarzanie obrazu dla lepszego rozpoznawania pisma odręcznego."""
         try:
+            # Poprzednia implementacja pozostaje bez zmian
             # Zapisanie oryginalnego obrazu ROI do debugowania
             debug_path = os.path.join(self.debug_dir, f"roi_{roi_name}_original.png")
             image.save(debug_path)
@@ -145,40 +140,23 @@ class PDFProcessor:
             roi_image = self.preprocess_image_for_handwriting(roi_image, roi_name)
             
             # Spróbujmy różnych konfiguracji OCR
+            configs = [
+                (r'--oem 1 --psm 6 -c tessedit_char_whitelist=0123456789.', "Cyfry"),
+                (r'--oem 1 --psm 7', "Jedna linia"),
+                (r'--oem 1 --psm 7 -c tessedit_char_whitelist=0123456789-', "Cyfry ze znakami")
+            ]
             
-            # 1. Domyślna konfiguracja - tylko cyfry i kropki
-            digits_config = r'--oem 1 --psm 6 -c tessedit_char_whitelist=0123456789.'
-            text_digits = pytesseract.image_to_string(roi_image, config=digits_config).strip()
-            print(f"OCR {roi_name} (tylko cyfry): '{text_digits}'")
+            for config, config_name in configs:
+                text = pytesseract.image_to_string(roi_image, config=config).strip()
+                print(f"OCR {roi_name} ({config_name}): '{text}'")
+                
+                # Zwróć pierwszy niepusty wynik
+                if text:
+                    return text
             
-            # 2. Konfiguracja dla jednej linii tekstu
-            line_config = r'--oem 1 --psm 7'
-            text_line = pytesseract.image_to_string(roi_image, config=line_config).strip()
-            print(f"OCR {roi_name} (jedna linia): '{text_line}'")
+            print(f"Nie udało się rozpoznać tekstu dla {roi_name}")
+            return ""
             
-            # 3. Konfiguracja dla liczb
-            digits_config2 = r'--oem 1 --psm 7 -c tessedit_char_whitelist=0123456789-.'
-            text_digits2 = pytesseract.image_to_string(roi_image, config=digits_config2).strip()
-            print(f"OCR {roi_name} (tylko cyfry i znaki specjalne): '{text_digits2}'")
-            
-            # 4. Szybka konfiguracja - mniej dokładna, ale szybsza
-            fast_config = r'--oem 0 --psm 6'
-            text_fast = pytesseract.image_to_string(roi_image, config=fast_config).strip()
-            print(f"OCR {roi_name} (szybki tryb): '{text_fast}'")
-            
-            # Wybór metody OCR (możemy przełączać między metodami)
-            if any(c.isdigit() for c in text_digits2):
-                text = text_digits2
-            elif any(c.isdigit() for c in text_digits):
-                text = text_digits
-            elif any(c.isdigit() for c in text_line):
-                text = text_line
-            else:
-                text = text_fast
-            
-            print(f"Wybrany wynik OCR dla {roi_name}: '{text}'")
-            
-            return text
         except Exception as e:
             print(f"Błąd podczas ekstrakcji tekstu z ROI {roi_name}: {e}")
             import traceback
@@ -284,7 +262,7 @@ class PDFProcessor:
             print(f"ROI dla numeru operatora: {template[3]}")
             print(f"ROI dla daty: {template[4]}")
             
-            # Konwersja PDF do obrazu używając PyMuPDF
+            # Konwersja PDF do obrazu używając popplera
             image = self.pdf_to_pil_image(pdf_path)
             if not image:
                 print("Nie udało się skonwertować PDF do obrazu")
@@ -339,285 +317,15 @@ class PDFProcessor:
     def extract_data_from_pdf(self, pdf_path):
         """Główna funkcja ekstrakcji danych z PDF."""
         try:
-            # ZMIANA: Najpierw definiujemy klasy dialogów zamiast ich importowania
-            # Dzięki temu unikamy cyklicznych importów
-            
-            # Definicja klasy OCRResultDialog
-            class OCRResultDialog(QDialog):
-                def __init__(self, debug_info, pdf_path, parent=None):
-                    super().__init__(parent)
-                    self.debug_info = debug_info
-                    self.pdf_path = pdf_path
-                    
-                    # Import widgetów i modułów potrzebnych dla dialogu
-                    from PyQt5.QtWidgets import (QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
-                                                QLineEdit, QTabWidget, QWidget, QFormLayout, 
-                                                QDialogButtonBox, QFileDialog, QTextEdit, QScrollArea)
-                    from PyQt5.QtCore import Qt, QByteArray
-                    from PyQt5.QtGui import QPixmap
-                    
-                    # Inicjalizacja UI
-                    self.setWindowTitle("Podgląd i edycja danych")
-                    self.setMinimumSize(800, 600)
-                    
-                    layout = QVBoxLayout()
-                    
-                    # Zakładki
-                    self.tab_widget = QTabWidget()
-                    self.tab_preview = QWidget()
-                    self.tab_manual = QWidget()
-                    self.tab_debug = QWidget()
-                    
-                    self.tab_widget.addTab(self.tab_preview, "Podgląd dokumentu")
-                    self.tab_widget.addTab(self.tab_manual, "Edycja danych")
-                    self.tab_widget.addTab(self.tab_debug, "Informacje diagnostyczne")
-                    
-                    # Zakładka podglądu
-                    preview_layout = QVBoxLayout()
-                    
-                    # Podgląd dokumentu z zaznaczonymi obszarami
-                    preview_layout.addWidget(QLabel("<b>Dokument z zaznaczonymi obszarami:</b>"))
-                    
-                    self.image_view = QLabel()
-                    self.image_view.setAlignment(Qt.AlignCenter)
-                    
-                    # Wczytanie obrazu
-                    pixmap = QPixmap()
-                    pixmap.loadFromData(QByteArray(self.debug_info['image_data']))
-                    
-                    # Skalowanie obrazu, jeśli jest zbyt duży
-                    max_width = 700
-                    if pixmap.width() > max_width:
-                        pixmap = pixmap.scaledToWidth(max_width, Qt.SmoothTransformation)
-                    
-                    self.image_view.setPixmap(pixmap)
-                    
-                    scroll_area = QScrollArea()
-                    scroll_area.setWidget(self.image_view)
-                    scroll_area.setWidgetResizable(True)
-                    preview_layout.addWidget(scroll_area)
-                    
-                    # Rozpoznane dane
-                    preview_layout.addWidget(QLabel("<b>Rozpoznane dane:</b>"))
-                    data_form = QFormLayout()
-                    
-                    self.found_zlecenie = QLineEdit(self.debug_info['numer_zlecenia'])
-                    self.found_zlecenie.setReadOnly(True)
-                    
-                    self.found_operator = QLineEdit(self.debug_info['numer_operatora'])
-                    self.found_operator.setReadOnly(True)
-                    
-                    self.found_data = QLineEdit(self.debug_info['data_raportu'])
-                    self.found_data.setReadOnly(True)
-                    
-                    data_form.addRow("Rozpoznany numer zlecenia:", self.found_zlecenie)
-                    data_form.addRow("Rozpoznany numer operatora:", self.found_operator)
-                    data_form.addRow("Rozpoznana data:", self.found_data)
-                    
-                    preview_layout.addLayout(data_form)
-                    
-                    self.tab_preview.setLayout(preview_layout)
-                    
-                    # Zakładka edycji danych
-                    manual_layout = QVBoxLayout()
-                    manual_layout.addWidget(QLabel("Zweryfikuj rozpoznane dane lub wprowadź je ręcznie:"))
-                    
-                    form_layout = QFormLayout()
-                    
-                    self.numer_zlecenia_edit = QLineEdit()
-                    self.numer_zlecenia_edit.setPlaceholderText("Format: XXX-XXXX-XXXX-XXX")
-                    
-                    self.numer_operatora_edit = QLineEdit()
-                    self.data_raportu_edit = QLineEdit()
-                    self.data_raportu_edit.setPlaceholderText("Format: DD.MM.YYYY")
-                    
-                    form_layout.addRow("Numer zlecenia:", self.numer_zlecenia_edit)
-                    form_layout.addRow("Numer operatora:", self.numer_operatora_edit)
-                    form_layout.addRow("Data raportu:", self.data_raportu_edit)
-                    
-                    # Dodanie pola edycji ścieżki do pliku PDF
-                    self.sciezka_pdf_edit = QLineEdit(self.pdf_path)
-                    self.sciezka_pdf_edit.setReadOnly(True)
-                    
-                    browse_btn = QPushButton("Zmień...")
-                    browse_btn.clicked.connect(self.browse_pdf)
-                    
-                    path_layout = QHBoxLayout()
-                    path_layout.addWidget(self.sciezka_pdf_edit)
-                    path_layout.addWidget(browse_btn)
-                    
-                    form_layout.addRow("Ścieżka do pliku PDF:", path_layout)
-                    
-                    manual_layout.addLayout(form_layout)
-                    
-                    # Wypełnienie wartościami, jeśli zostały rozpoznane
-                    if self.debug_info['numer_zlecenia'] != "NIEZNANY":
-                        self.numer_zlecenia_edit.setText(self.debug_info['numer_zlecenia'])
-                    
-                    if self.debug_info['numer_operatora'] != "NIEZNANY":
-                        self.numer_operatora_edit.setText(self.debug_info['numer_operatora'])
-                    
-                    if self.debug_info['data_raportu'] != "NIEZNANA":
-                        self.data_raportu_edit.setText(self.debug_info['data_raportu'])
-                        
-                    self.tab_manual.setLayout(manual_layout)
-                    
-                    # Zakładka informacji diagnostycznych
-                    debug_layout = QVBoxLayout()
-                    debug_layout.addWidget(QLabel("<b>Informacje diagnostyczne:</b>"))
-                    
-                    debug_text = QTextEdit()
-                    debug_text.setReadOnly(True)
-                    
-                    debug_info_str = f"Surowe dane rozpoznane z OCR:\n\n"
-                    debug_info_str += f"Numer zlecenia (surowy): {self.debug_info.get('numer_zlecenia_raw', 'brak')}\n"
-                    debug_info_str += f"Numer operatora (surowy): {self.debug_info.get('numer_operatora_raw', 'brak')}\n"
-                    debug_info_str += f"Data (surowa): {self.debug_info.get('data_raportu_raw', 'brak')}\n\n"
-                    
-                    debug_info_str += "Szablon rozpoznawania:\n"
-                    template = self.debug_info.get('template')
-                    if template:
-                        debug_info_str += f"ID szablonu: {template[0]}\n"
-                        debug_info_str += f"Nazwa szablonu: {template[1]}\n"
-                        debug_info_str += f"ROI numer zlecenia: {template[2]}\n"
-                        debug_info_str += f"ROI numer operatora: {template[3]}\n"
-                        debug_info_str += f"ROI data: {template[4]}\n"
-                    else:
-                        debug_info_str += "Brak szablonu rozpoznawania\n"
-                        
-                    debug_text.setText(debug_info_str)
-                    debug_layout.addWidget(debug_text)
-                    
-                    self.tab_debug.setLayout(debug_layout)
-                    
-                    # Dodanie zakładek do głównego układu
-                    layout.addWidget(self.tab_widget)
-                    
-                    # Przyciski
-                    button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-                    button_box.accepted.connect(self.accept)
-                    button_box.rejected.connect(self.reject)
-                    layout.addWidget(button_box)
-                    
-                    self.setLayout(layout)
-                    
-                    # Przejdź od razu do zakładki edycji danych
-                    self.tab_widget.setCurrentIndex(1)
-                
-                def browse_pdf(self):
-                    """Wybór nowej ścieżki do pliku PDF."""
-                    from PyQt5.QtWidgets import QFileDialog
-                    
-                    file_path, _ = QFileDialog.getOpenFileName(
-                        self, "Wybierz plik PDF", "", "Pliki PDF (*.pdf)"
-                    )
-                    
-                    if file_path:
-                        self.sciezka_pdf_edit.setText(file_path)
-                
-                def get_data(self):
-                    """Zwraca wprowadzone dane."""
-                    return {
-                        'numer_zlecenia': self.numer_zlecenia_edit.text(),
-                        'numer_operatora': self.numer_operatora_edit.text(),
-                        'data_raportu': self.data_raportu_edit.text(),
-                        'sciezka_pdf': self.sciezka_pdf_edit.text()
-                    }
-            
-            # Definicja klasy ManualDataEntryDialog
-            class ManualDataEntryDialog(QDialog):
-                def __init__(self, parent=None, pdf_path=None):
-                    super().__init__(parent)
-                    self.pdf_path = pdf_path
-                    
-                    # Import widgetów potrzebnych dla dialogu
-                    from PyQt5.QtWidgets import (QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
-                                                QLineEdit, QFormLayout, QDialogButtonBox, QFileDialog)
-                    
-                    self.setWindowTitle("Wprowadź dane raportu")
-                    self.setMinimumWidth(400)
-                    
-                    layout = QVBoxLayout()
-                    
-                    # Komunikat
-                    layout.addWidget(QLabel("Wprowadź dane raportu ręcznie:"))
-                    
-                    # Formularz
-                    form_layout = QFormLayout()
-                    
-                    self.numer_zlecenia_edit = QLineEdit()
-                    self.numer_zlecenia_edit.setPlaceholderText("Format: XXX-XXXX-XXXX-XXX")
-                    
-                    self.numer_operatora_edit = QLineEdit()
-                    self.data_raportu_edit = QLineEdit()
-                    self.data_raportu_edit.setPlaceholderText("Format: DD.MM.YYYY")
-                    
-                    form_layout.addRow("Numer zlecenia:", self.numer_zlecenia_edit)
-                    form_layout.addRow("Numer operatora:", self.numer_operatora_edit)
-                    form_layout.addRow("Data raportu:", self.data_raportu_edit)
-                    
-                    # Dodanie pola edycji ścieżki do pliku PDF
-                    if self.pdf_path:
-                        self.sciezka_pdf_edit = QLineEdit(self.pdf_path)
-                        self.sciezka_pdf_edit.setReadOnly(True)
-                        
-                        browse_btn = QPushButton("Zmień...")
-                        browse_btn.clicked.connect(self.browse_pdf)
-                        
-                        path_layout = QHBoxLayout()
-                        path_layout.addWidget(self.sciezka_pdf_edit)
-                        path_layout.addWidget(browse_btn)
-                        
-                        form_layout.addRow("Ścieżka do pliku PDF:", path_layout)
-                    
-                    layout.addLayout(form_layout)
-                    
-                    # Przyciski
-                    button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-                    button_box.accepted.connect(self.accept)
-                    button_box.rejected.connect(self.reject)
-                    layout.addWidget(button_box)
-                    
-                    self.setLayout(layout)
-                
-                def browse_pdf(self):
-                    """Wybór nowej ścieżki do pliku PDF."""
-                    from PyQt5.QtWidgets import QFileDialog
-                    
-                    file_path, _ = QFileDialog.getOpenFileName(
-                        self, "Wybierz plik PDF", "", "Pliki PDF (*.pdf)"
-                    )
-                    
-                    if file_path:
-                        self.sciezka_pdf_edit.setText(file_path)
-                
-                def get_data(self):
-                    """Zwraca wprowadzone dane."""
-                    data = {
-                        'numer_zlecenia': self.numer_zlecenia_edit.text(),
-                        'numer_operatora': self.numer_operatora_edit.text(),
-                        'data_raportu': self.data_raportu_edit.text()
-                    }
-                    
-                    if hasattr(self, 'sciezka_pdf_edit'):
-                        data['sciezka_pdf'] = self.sciezka_pdf_edit.text()
-                        
-                    return data
+            # Import dialogu lokalnie, aby uniknąć cyklicznych importów
+            from views.dialogs.ocr_dialog import OCRResultDialog
+            from views.dialogs.manual_dialog import ManualDataEntryDialog
             
             # Próba ekstrakcji danych przy użyciu szablonu
             numer_zlecenia, numer_operatora, data_raportu, debug_info = self.extract_data_from_pdf_with_template(pdf_path)
             
-            # Zawsze pokazuj dialog podglądu i edycji, nawet jeśli dane zostały poprawnie rozpoznane
-            if debug_info:
-                dialog = OCRResultDialog(debug_info, pdf_path)
-                if dialog.exec_() == QDialog.Accepted:
-                    manual_data = dialog.get_data()
-                    
-                    numer_zlecenia = manual_data['numer_zlecenia']
-                    numer_operatora = manual_data['numer_operatora'] 
-                    data_raportu = manual_data['data_raportu']
-            else:
-                # Jeśli nie ma informacji debugowania, wyświetl prosty dialog
+            # Jeśli nie ma informacji debugowania lub dane są niepoprawne
+            if not debug_info or numer_zlecenia in ["BŁĄD", "NIEZNANY"]:
                 dialog = ManualDataEntryDialog(pdf_path=pdf_path)
                 if dialog.exec_() == QDialog.Accepted:
                     manual_data = dialog.get_data()
@@ -629,10 +337,28 @@ class PDFProcessor:
                     # Użytkownik anulował import
                     return None, None, None
             
+            # Jeśli mamy dane debugowania, pokaż dialog podglądu
+            elif debug_info:
+                dialog = OCRResultDialog(debug_info, pdf_path)
+                if dialog.exec_() == QDialog.Accepted:
+                    manual_data = dialog.get_data()
+                    
+                    numer_zlecenia = manual_data['numer_zlecenia']
+                    numer_operatora = manual_data['numer_operatora']
+                    data_raportu = manual_data['data_raportu']
+                    pdf_path = manual_data.get('sciezka_pdf', pdf_path)
+                else:
+                    # Użytkownik anulował import
+                    return None, None, None
+            
+            # Zwróć dane, nawet jeśli zostały ręcznie poprawione
             return numer_zlecenia, numer_operatora, data_raportu
             
         except Exception as e:
             import traceback
             print(f"Błąd podczas ekstrakji danych z PDF: {e}")
             print(traceback.format_exc())
-            return "BŁĄD", "BŁĄD", "BŁĄD"
+            return None, None, None
+
+# Dodaj eksport klasy
+__all__ = ['PDFProcessor']# -*- coding: utf-8 -*-
